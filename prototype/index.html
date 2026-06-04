@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Moni Budget Copilot</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="phone-shell" aria-label="Moni Budget Copilot prototype">
+      <section class="app-screen active" id="chatScreen" aria-label="Trợ thủ AI Moni">
+        <header class="topbar">
+          <button class="icon-btn" type="button" aria-label="Quay lại">‹</button>
+          <h1>Trợ thủ AI - Moni</h1>
+          <div class="top-actions">
+            <button class="icon-btn" type="button" aria-label="Yêu thích">☆</button>
+            <button class="pill-icons" type="button" aria-label="Đi tới trang chủ">
+              <span>✏</span><span></span><span>⌂</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="chat-log" id="chatLog" aria-live="polite"></div>
+
+        <form class="composer" id="chatForm">
+          <button class="menu-btn" type="button" aria-label="Mở menu">☰</button>
+          <label class="input-wrap">
+            <span aria-hidden="true">✦</span>
+            <input
+              id="chatInput"
+              type="text"
+              autocomplete="off"
+              placeholder="Hỏi Moni bất cứ điều gì..."
+              aria-label="Nhập tin nhắn cho Moni"
+            />
+          </label>
+          <button class="send-btn" type="submit" aria-label="Gửi tin nhắn">↑</button>
+        </form>
+      </section>
+
+      <section class="app-screen" id="budgetScreen" aria-label="Ngân sách">
+        <header class="topbar budget-top">
+          <button class="icon-btn" id="backToChat" type="button" aria-label="Quay lại chat">‹</button>
+          <h1>Ngân sách</h1>
+          <button class="pill-icons" type="button" aria-label="Trợ thủ và trang chủ">
+            <span>✏</span><span></span><span>⌂</span>
+          </button>
+        </header>
+
+        <div class="budget-content">
+          <section class="month-strip">
+            <div>
+              <h2>Tháng 6 2026</h2>
+              <p id="daysLeftLabel">Còn 26 ngày</p>
+            </div>
+            <button class="outline-action" id="seedWarning" type="button">+ Thêm mới</button>
+          </section>
+
+          <section class="summary-panel" id="dashboardSummary">
+            <div class="summary-head">
+              <div>
+                <p>Ngân sách tháng</p>
+                <h2 id="dashboardBudget">10.000.000đ</h2>
+              </div>
+              <span class="status-chip safe" id="dashboardRisk">An toàn</span>
+            </div>
+            <div class="progress-track" aria-label="Tiến độ ngân sách">
+              <span id="budgetProgress"></span>
+            </div>
+            <div class="metric-grid">
+              <article>
+                <p>Đã chi</p>
+                <strong id="dashboardSpent">4.580.000đ</strong>
+              </article>
+              <article>
+                <p>Còn lại</p>
+                <strong id="dashboardRemaining">5.420.000đ</strong>
+              </article>
+              <article>
+                <p>Dự báo</p>
+                <strong id="dashboardForecast">9.160.000đ</strong>
+              </article>
+              <article>
+                <p>Nên chi/ngày</p>
+                <strong id="dashboardDaily">361.000đ</strong>
+              </article>
+            </div>
+          </section>
+
+          <section class="section-row">
+            <h2>Danh mục</h2>
+            <button class="text-action" type="button">Xếp theo tên ≡</button>
+          </section>
+          <div class="category-list" id="categoryList"></div>
+
+          <section class="section-row">
+            <h2>Giao dịch gần đây</h2>
+            <button class="text-action" id="reviewTransactions" type="button">Rà soát</button>
+          </section>
+          <div class="transaction-list" id="transactionList"></div>
+
+          <section class="chart-card">
+            <div class="section-row compact">
+              <h2>Chi theo danh mục</h2>
+              <span>Tháng này</span>
+            </div>
+            <div class="bar-chart" id="categoryChart"></div>
+          </section>
+        </div>
+      </section>
+
+      <nav class="bottom-tabs" aria-label="Điều hướng">
+        <button class="tab active" data-target="chatScreen" type="button">
+          <span>✦</span>
+          <strong>Moni</strong>
+        </button>
+        <button class="tab" data-target="budgetScreen" type="button">
+          <span>▣</span>
+          <strong>Ngân sách</strong>
+        </button>
+      </nav>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

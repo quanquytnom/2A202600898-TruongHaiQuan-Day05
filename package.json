@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "start": "node prototype/server.js",
+    "dev": "node prototype/server.js"
+  }
+}
