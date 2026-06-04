@@ -1,10 +1,22 @@
 const http = require("node:http");
-const fs = require("node:fs");
 const path = require("node:path");
+const { loadEnv: loadEnvFile } = require("./server/env");
+const {
+  readJson: readRequestJson,
+  sendJson: sendJsonResponse,
+  serveStatic: serveStaticFile
+} = require("./server/http");
+const { buildSelectionSystemPrompt, buildFinalSystemPrompt } = require("./server/prompts");
+const { toolSchemas: buildToolSchemas } = require("./server/toolSchemas");
+const {
+  callOpenAIForToolSelection: selectToolWithOpenAI,
+  callOpenAIFinalResponse: reasonWithOpenAI,
+  normalizeToolName: normalizeSelectedToolName
+} = require("./server/openaiClient");
 
 const rootDir = __dirname;
 const port = Number(process.env.PORT || 5173);
-const env = loadEnv(path.join(rootDir, "..", ".env"));
+const env = loadEnvFile(path.join(rootDir, "..", ".env"));
 
 const CURRENT_MONTH = "2026-06";
 const USER_ID = "demo_user";
@@ -45,14 +57,14 @@ const state = {
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "POST" && req.url === "/api/moni/chat") {
-      const body = await readJson(req);
+      const body = await readRequestJson(req);
       const payload = await handleMoniChat(body);
-      sendJson(res, 200, payload);
+      sendJsonResponse(res, 200, payload);
       return;
     }
 
     if (req.method === "GET" && req.url === "/api/moni/config") {
-      sendJson(res, 200, {
+      sendJsonResponse(res, 200, {
         hasOpenAIKey: Boolean(env.OPENAI_API_KEY),
         model: env.OPENAI_MODEL || "gpt-4.1-mini",
         mode: env.OPENAI_API_KEY ? "openai" : "mock"
@@ -60,10 +72,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    serveStatic(req, res);
+    serveStaticFile(req, res, rootDir);
   } catch (error) {
     console.error("[Moni server error]", error);
-    sendJson(res, 500, {
+    sendJsonResponse(res, 500, {
       error: {
         code: error.code || "server_error",
         message: error.message || "Server error"
@@ -92,23 +104,13 @@ async function handleMoniChat({ message, userId = USER_ID, month = CURRENT_MONTH
 
   const context = buildLLMContext(month);
   const selectionRequest = {
-    system: [
-      "Bạn là Moni Budget Copilot.",
-      "Nhiệm vụ bước 1: xác định intent/entity và chọn tool phù hợp.",
-      "Không tự ghi dữ liệu tài chính.",
-      "Không tự tính toán ngân sách bằng lời.",
-      "Mọi con số tài chính phải đến từ context hoặc tool result.",
-      "Nếu thiếu dữ liệu để write an toàn, trả needsConfirmation.",
-      "Khi user hỏi có nên mua, có nên đăng ký, có nên nâng cấp, có nên đi du lịch, có nên chi hoặc có nên trả tiền, BẮT BUỘC gọi advisePurchaseDecision.",
-      "Không trả lời tư vấn mua sắm trực tiếp bằng kiến thức chung.",
-      "Trả JSON ngắn gọn, không markdown."
-    ].join("\n"),
+    system: buildSelectionSystemPrompt(),
     user: { message, userId, month, context },
-    tools: toolSchemas()
+    tools: buildToolSchemas()
   };
 
   const selectionResponse = env.OPENAI_API_KEY
-    ? await callOpenAIForToolSelection(selectionRequest)
+    ? await selectToolWithOpenAI({ env, request: selectionRequest })
     : mockLLMRoute(message);
 
   console.log("\n[Moni LLM request]");
@@ -130,7 +132,7 @@ async function handleMoniChat({ message, userId = USER_ID, month = CURRENT_MONTH
     };
   }
 
-  const toolName = normalizeToolName(selectionResponse.tool);
+  const toolName = normalizeSelectedToolName(selectionResponse.tool);
   const preparedArguments = prepareToolArguments({
     toolName,
     args: selectionResponse.arguments || {},
@@ -164,7 +166,7 @@ async function handleMoniChat({ message, userId = USER_ID, month = CURRENT_MONTH
     toolResults: [{ call: toolCall, result: toolResult }]
   });
   const finalResponse = env.OPENAI_API_KEY
-    ? await callOpenAIFinalResponse(finalRequest)
+    ? await reasonWithOpenAI({ env, request: finalRequest })
     : mockFinalResponse({ toolName, toolResult });
   const fallbackCards = cardsForTool(toolName, toolResult);
   const finalCards = Array.isArray(finalResponse.cards) && finalResponse.cards.length
@@ -199,19 +201,7 @@ async function handleMoniChat({ message, userId = USER_ID, month = CURRENT_MONTH
 
 function buildFinalReasoningRequest({ message, userId, month, context, toolResults }) {
   return {
-    system: [
-      "Bạn là Moni Budget Copilot.",
-      "Nhiệm vụ bước 2: dùng tool result để trả lời user bằng tiếng Việt.",
-      "Không tự bịa số liệu. Chỉ dùng số trong toolResults hoặc context.",
-      "Với purchase advice, phải nêu quyết định, safeToSpendScore và lý do dựa trên ngân sách/forecast.",
-      "assistantMessage phải là Markdown thân thiện: dùng đoạn ngắn, bullet points cho số liệu, **bold** cho số tiền/điểm quan trọng.",
-      "Không viết một đoạn văn dài.",
-      "Không expose tên biến nội bộ như safeToSpendThresholds.",
-      "Không nhắc implementation details.",
-      "Không output JSON bên trong assistantMessage.",
-      "Nếu tool result thiếu dữ liệu, hỏi lại user.",
-      "Trả JSON: {\"assistantMessage\":\"...\",\"cards\":[]}."
-    ].join("\n"),
+    system: buildFinalSystemPrompt(),
     user: {
       message,
       userId,
@@ -220,110 +210,6 @@ function buildFinalReasoningRequest({ message, userId, month, context, toolResul
       toolResults
     }
   };
-}
-
-async function callOpenAIForToolSelection(llmRequest) {
-  const model = env.OPENAI_MODEL || "gpt-4.1-mini";
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      input: [
-        { role: "system", content: llmRequest.system },
-        {
-          role: "user",
-          content: [
-            "Return only JSON with shape:",
-            '{"intent":"...","tool":"...","arguments":{...},"assistantMessage":"...","cards":[]}',
-            JSON.stringify(llmRequest.user)
-          ].join("\n")
-        }
-      ],
-      tools: llmRequest.tools,
-      tool_choice: "auto"
-    })
-  });
-
-  const raw = await response.json();
-  if (!response.ok) {
-    return {
-      intent: "openai_error",
-      assistantMessage: "Mình chưa gọi được OpenAI API. Server sẽ dùng mock routing.",
-      raw,
-      fallback: mockLLMRoute(llmRequest.user.message)
-    };
-  }
-
-  const functionCall = (raw.output || []).find((item) => item.type === "function_call");
-  if (functionCall) {
-    return {
-      intent: normalizeToolName(functionCall.name),
-      tool: normalizeToolName(functionCall.name),
-      arguments: JSON.parse(functionCall.arguments || "{}"),
-      raw
-    };
-  }
-
-  const text = extractOutputText(raw);
-  try {
-    const parsed = JSON.parse(text);
-    return { ...parsed, tool: normalizeToolName(parsed.tool), raw };
-  } catch {
-    return {
-      intent: "small_talk_or_help",
-      assistantMessage: text || "Mình chưa hiểu rõ yêu cầu.",
-      raw
-    };
-  }
-}
-
-async function callOpenAIFinalResponse(finalRequest) {
-  const model = env.OPENAI_MODEL || "gpt-4.1-mini";
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      input: [
-        { role: "system", content: finalRequest.system },
-        {
-          role: "user",
-          content: [
-            "Return only JSON with shape:",
-            '{"assistantMessage":"...","cards":[]}',
-            JSON.stringify(finalRequest.user)
-          ].join("\n")
-        }
-      ]
-    })
-  });
-
-  const raw = await response.json();
-  if (!response.ok) {
-    return {
-      assistantMessage: "",
-      cards: [],
-      error: { code: "openai_final_failed", raw }
-    };
-  }
-
-  const text = extractOutputText(raw);
-  try {
-    return { ...JSON.parse(text), raw };
-  } catch {
-    return {
-      assistantMessage: text,
-      cards: [],
-      raw
-    };
-  }
 }
 
 function executeTool(toolName, args) {
@@ -373,21 +259,6 @@ function prepareToolArguments({ toolName, args, message, month }) {
     category,
     month: args.month || month
   };
-}
-
-function normalizeToolName(toolName = "") {
-  return String(toolName).replace(/^functions\./, "");
-}
-
-function extractOutputText(raw) {
-  if (raw.output_text) return raw.output_text;
-
-  return (raw.output || [])
-    .flatMap((item) => item.content || [])
-    .filter((content) => content.type === "output_text" && content.text)
-    .map((content) => content.text)
-    .join("\n")
-    .trim();
 }
 
 const tools = {
@@ -983,32 +854,6 @@ function buildLLMContext(month) {
   };
 }
 
-function toolSchemas() {
-  return [
-    { type: "function", name: "addExpense", description: "Thêm khoản chi.", parameters: schema(["label", "amount", "category"], { label: "string", amount: "number", category: "string", date: "string", note: "string" }) },
-    { type: "function", name: "updateMonthlyBudget", description: "Cập nhật ngân sách tổng tháng.", parameters: schema(["amount", "month"], { amount: "number", month: "string" }) },
-    { type: "function", name: "updateCategoryBudget", description: "Cập nhật ngân sách danh mục.", parameters: schema(["category", "amount", "month"], { category: "string", amount: "number", month: "string" }) },
-    { type: "function", name: "markExpenseException", description: "Đánh dấu khoản chi là ngoại lệ.", parameters: schema(["exceptionType"], { transactionId: "string", searchQuery: "string", exceptionType: "string" }) },
-    { type: "function", name: "getBudgetSnapshot", description: "Lấy snapshot ngân sách.", parameters: schema(["month"], { month: "string", category: "string" }) },
-    { type: "function", name: "reviewUnusualExpenses", description: "Rà soát khoản bất thường.", parameters: schema(["month"], { month: "string" }) },
-    { type: "function", name: "getSpendingBreakdown", description: "Phân tích nhóm chi tiêu lớn nhất.", parameters: schema(["month"], { month: "string" }) },
-    { type: "function", name: "getRecentTransactions", description: "Lấy các giao dịch gần đây.", parameters: schema(["month"], { month: "string", limit: "number" }) },
-    { type: "function", name: "simulateExpense", description: "Mô phỏng một khoản chi tương lai, không ghi dữ liệu thật.", parameters: schema(["label", "amount", "category", "month"], { label: "string", amount: "number", category: "string", date: "string", month: "string" }) },
-    { type: "function", name: "advisePurchaseDecision", description: "Đánh giá có nên mua/đăng ký/nâng cấp/đi du lịch dựa trên ngân sách, forecast và spending velocity.", parameters: schema(["item", "amount", "category", "month"], { item: "string", amount: "number", category: "string", month: "string" }) },
-    { type: "function", name: "getForecastAnalysis", description: "Giải thích lý do cảnh báo hoặc nguy cơ vượt ngân sách.", parameters: schema(["month"], { month: "string" }) },
-    { type: "function", name: "getCategorySummary", description: "Lấy tổng quan một danh mục.", parameters: schema(["category", "month"], { category: "string", month: "string" }) }
-  ];
-}
-
-function schema(required, props) {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required,
-    properties: Object.fromEntries(Object.entries(props).map(([key, type]) => [key, { type }]))
-  };
-}
-
 function tx(label, amount, category, date, options = {}) {
   const now = new Date().toISOString();
   return {
@@ -1211,66 +1056,3 @@ function money(value) {
   return `${Math.round(value).toLocaleString("vi-VN")}đ`;
 }
 
-function loadEnv(filePath) {
-  if (!fs.existsSync(filePath)) return {};
-  return fs.readFileSync(filePath, "utf8").split(/\r?\n/).reduce((acc, line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) return acc;
-    const index = trimmed.indexOf("=");
-    if (index === -1) return acc;
-    const key = trimmed.slice(0, index).trim();
-    const value = trimmed.slice(index + 1).trim().replace(/^["']|["']$/g, "");
-    acc[key] = value;
-    process.env[key] ||= value;
-    return acc;
-  }, {});
-}
-
-function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let raw = "";
-    req.on("data", (chunk) => {
-      raw += chunk;
-      if (raw.length > 1_000_000) {
-        reject(new Error("Request body too large"));
-        req.destroy();
-      }
-    });
-    req.on("end", () => {
-      try {
-        resolve(raw ? JSON.parse(raw) : {});
-      } catch {
-        reject(new Error("Invalid JSON"));
-      }
-    });
-  });
-}
-
-function sendJson(res, status, payload) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(payload, null, 2));
-}
-
-function serveStatic(req, res) {
-  const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
-  const requested = urlPath === "/" ? "/index.html" : urlPath;
-  const filePath = path.normalize(path.join(rootDir, requested));
-  if (!filePath.startsWith(rootDir)) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return;
-  }
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    res.writeHead(404);
-    res.end("Not found");
-    return;
-  }
-  const ext = path.extname(filePath);
-  const contentType = {
-    ".html": "text/html; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8"
-  }[ext] || "application/octet-stream";
-  res.writeHead(200, { "Content-Type": contentType });
-  fs.createReadStream(filePath).pipe(res);
-}
